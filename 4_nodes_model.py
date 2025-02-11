@@ -30,7 +30,7 @@ class AgentState(TypedDict):
 
 # To find: model & finetuning?
 llm = ChatOpenAI(api_key= OPENAI_API_KEY,
-                 model="gpt-4")
+                 model="gpt-4o-mini")
 
 
 def clone_and_generate(state: AgentState) -> AgentState:
@@ -201,19 +201,19 @@ def decide_next(state: AgentState) -> str:
         return "abort"
 
 
-# determine whether to retry
-workflow.add_conditional_edges(
-    source = "review_code",
-    path = decide_next,
-    path_map={
-        "approve": "submit_code",
-        "retry": "clone_and_generate",
-        "abort": "abort"
-    }
-)
-
-workflow.add_edge("submit_code", END)
-workflow.add_edge("abort", END)
+# # determine whether to retry
+# workflow.add_conditional_edges(
+#     source = "review_code",
+#     path = decide_next,
+#     path_map={
+#         "approve": "submit_code",
+#         "retry": "clone_and_generate",
+#         "abort": "abort"
+#     }
+# )
+#
+# workflow.add_edge("submit_code", END)
+# workflow.add_edge("abort", END)
 
 # a util specifically to fix the rmtree issue on Windows
 def on_rm_error(func, path, exc_info):
@@ -221,16 +221,60 @@ def on_rm_error(func, path, exc_info):
     func(path)
 
 
-initial_state: AgentState = {
-    "repo_url": "https://github.com/dangn511/test-task",  # Replace with your repo URL.
-    "repo_path": "",
-    "task_description": "",
-    "generated_code": "",
-    "review_decision": "",
-    "review_feedback": ""
-}
+def run_agent(api_key: str, repo_url: str, language: str = "python") -> AgentState:
+    # Set the API key in the environment.
+    os.environ["OPENAI_API_KEY"] = api_key
+    initial_state: AgentState = {
+        "repo_url": repo_url,
+        "repo_path": "",
+        "task_description": "",
+        "generated_code": "",
+        "review_decision": "",
+        "review_feedback": "",
+        "language": language,
+    }
 
-app = workflow.compile()
-final_state = app.invoke(initial_state)
-print("\nFinal workflow state:")
-print(final_state)
+    workflow = StateGraph(AgentState)
+    workflow.add_node("clone_and_generate", clone_and_generate)
+    workflow.add_node("review_code", review_code)
+    workflow.add_node("submit_code", submit_code)
+    workflow.add_node("abort", abort_submission)
+
+    workflow.set_entry_point("clone_and_generate")
+
+    workflow.add_edge("clone_and_generate", "review_code")
+
+    # determine whether to retry
+    workflow.add_conditional_edges(
+        source="review_code",
+        path=decide_next,
+        path_map={
+            "approve": "submit_code",
+            "retry": "clone_and_generate",
+            "abort": "abort"
+        }
+    )
+
+    workflow.add_edge("submit_code", END)
+    workflow.add_edge("abort", END)
+
+
+    app = workflow.compile()
+    final_state = app.invoke(initial_state)
+    return final_state
+
+# initial_state: AgentState = {
+#     "repo_url": "https://github.com/dangn511/test-task",
+#     "repo_path": "",
+#     "task_description": "",
+#     "generated_code": "",
+#     "review_decision": "",
+#     "review_feedback": ""
+# }
+
+# app = workflow.compile()
+# final_state = app.invoke(initial_state)
+# print("\nFinal workflow state:")
+# print(final_state)
+
+run_agent(OPENAI_API_KEY, "https://github.com/dangn511/test-task")

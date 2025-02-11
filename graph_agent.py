@@ -1,236 +1,280 @@
 import os
-
-from langgraph.graph import StateGraph, END, START
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_anthropic import ChatAnthropic
-from pydantic import BaseModel, Field
-
+import stat
+import json
+import subprocess
+import shutil
+from typing import TypedDict
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, START, END
 from git import Repo
 from github import Github
-from typing import TypedDict
+
+f = open('keys.json')
+data = json.load(f)
+
+OPENAI_API_KEY = data["openai_key"]
+GITHUB_TOKEN = data['github_token']
+
+class AgentState(TypedDict):
+    repo_url: str
+    repo_path: str # local path
+    task_description: str # MUST be from a file named TASK.md
+    generated_code: str
+    review_decision: str
+    review_feedback: str
+    language: str
+    extension: str
+
+    # IMPORTANT remember only initialize repo_url
+
+# To find: model & finetuning?
+llm = ChatOpenAI(api_key= OPENAI_API_KEY,
+                 model="gpt-4o-mini")
 
 
-class CodeSolution(BaseModel):
-    description: str = Field(description="Approach to solution")
-    code: str = Field(description="Complete code")
+def clone_and_generate(state: AgentState) -> AgentState:
+    # If repo_path is empty, this is the first run
+    if not state.get("repo_path"):
+        clone_dir = "repo_clone"
+        state["repo_path"] = clone_dir
+
+        if os.path.exists(clone_dir):
+            shutil.rmtree(clone_dir, onerror=on_rm_error)  #TODO: cause issue in Windows
 
 
-class GraphState(TypedDict):
-    """State for the task processing workflow."""
-    status: str  # Using status instead of error to track state
-    task_content: str
-    repo_dir: str
-    generation: CodeSolution | None
-    iterations: int
-
-
-def clone_repository(github_token: str, repo_name: str) -> tuple[str, str]:
-    """Clone the repository and return the local directory."""
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        repo_dir = os.path.join(script_dir, 'agent-task')
-
-        if os.path.exists(repo_dir):
-            os.system(f'rm -rf {repo_dir}')
-
-        g = Github(github_token)
-        repo = g.get_repo(repo_name)
-
-        print(f"Cloning repository {repo_name}...")
-        Repo.clone_from(repo.clone_url, repo_dir)
+        # clone repo
+        clone_cmd = ["git", "clone", state["repo_url"], clone_dir]
+        print(f"Cloning repository from {state['repo_url']}...")
+        result = subprocess.run(clone_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception("Git clone failed: " + result.stderr)
         print("Repository cloned successfully.")
-        return repo_dir, ""
-    except Exception as e:
-        return "", f"Repository setup failed: {str(e)}"
+
+        task_file = os.path.join(clone_dir, "TASK.md")
+        if os.path.exists(task_file):
+            with open(task_file, "r") as f:
+                content = f.read().strip()
+            state["task_description"] = content
+            # get language requirement
+            for line in content.splitlines():
+                if line.lower().startswith("language to use:"):
+                    state["language"] = line.split(":", 1)[1].strip().lower()
+
+                    language = state.get("language", "python").lower()
+                    language_ext = {"python": ".py", "javascript": ".js", "java": ".java", "c++": ".cpp"}
+                    if language not in language_ext.keys():
+                        # default fallback
+                        state['extension'] = ".txt"
+                    else:
+                        state['extension'] = language_ext[language]
+
+                    print(f"Language specified in TASK.md: {state['language']}, generated code will use the extension {state['extension']}")
+
+                    break
+        else:
+            print("No task file in directory.")
+        print("Task description obtained.")
+    else:
+        print("Using existing repository clone.")
 
 
-def read_task_file(repo_dir: str) -> tuple[str, str]:
-    """Read the task markdown file."""
-    try:
-        task_path = os.path.join(repo_dir, 'tasks', 'task.md')
-        with open(task_path, 'r') as f:
-            return f.read(), ""
-    except Exception as e:
-        return "", f"Task read failed {str(e)}"
 
+    # MAIN PROMPT FOR CODER
 
-def initialize_state(github_token: str, repo_name: str) -> dict:
-    """Initialize the workflow state."""
-    repo_dir, error = clone_repository(github_token, repo_name)
-    if error:
-        return {
-            "status": "failed",
-            "task_content": "",
-            "repo_dir": "",
-            "generation": None,
-            "iterations": 0
-        }
+    prompt = f"You are a senior software engineer. Generate high quality code that completes this task:\n"
+    prompt += f"Task description:\n{state['task_description']}\n\n"
 
-    task_content, error = read_task_file(repo_dir)
-    if error:
-        return {
-            "status": "failed",
-            "task_content": "",
-            "repo_dir": repo_dir,
-            "generation": None,
-            "iterations": 0
-        }
-
-    return {
-        "status": "ready",
-        "task_content": task_content,
-        "repo_dir": repo_dir,
-        "generation": None,
-        "iterations": 0
-    }
-
-
-def generate_solution(state: GraphState):
-    """Generate code solution based on task description."""
-    if state["status"] == "failed":
-        return state
-
-    task_content = state["task_content"]
-    iterations = state["iterations"]
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a Python developer. Generate a solution based on the task requirements.
-        Include complete code with imports, type hints, docstring, and examples."""),
-        ("human", "Task description:\n{task}"),
-    ])
-
-    try:
-        llm = ChatAnthropic(model="claude-3-sonnet-20240229", temperature=0)
-        chain = prompt | llm.with_structured_output(CodeSolution)
-
-        print(f"Generating solution - Attempt #{iterations + 1}")
-        solution = chain.invoke({"task": task_content})
-
-        return {
-            "status": "generated",
-            "task_content": task_content,
-            "repo_dir": state["repo_dir"],
-            "generation": solution,
-            "iterations": iterations + 1
-        }
-    except Exception:
-        return {**state, "status": "failed"}
-
-
-def test_solution(state: GraphState):
-    """Test the generated code solution."""
-    if state["status"] != "generated" or not state["generation"]:
-        return {**state, "status": "failed"}
-
-    try:
-        namespace = {}
-        exec(state["generation"].code, namespace)
-
-        result = namespace['calculate_products']([1, 2, 3, 4])
-        if result != [24, 12, 8, 6]:
-            return {**state, "status": "failed"}
-
-        return {**state, "status": "tested"}
-
-    except Exception:
-        return {**state, "status": "failed"}
-
-
-def create_pr(state: GraphState):
-    """Create a pull request with the solution."""
-    if state["status"] != "tested" or not state["generation"]:
-        return {**state, "status": "failed"}
-
-    try:
-        solution = state["generation"]
-        repo = Repo(state["repo_dir"])
-
-        # Local git operations
-        branch_name = f"solution/array-products"
-        current = repo.create_head(branch_name)
-        current.checkout()
-
-        solution_path = os.path.join(state["repo_dir"], "array_products.py")
-        with open(solution_path, "w") as f:
-            f.write(solution.code)
-
-        repo.index.add(["array_products.py"])
-        repo.index.commit("feat: add array products calculator")
-        origin = repo.remote("origin")
-        origin.push(branch_name)
-
-        # Create PR using GitHub API
-        g = Github(os.getenv("GITHUB_TOKEN"))
-        repo_name = repo.remotes.origin.url.split('.git')[0].split('/')[-2:]
-        repo_name = '/'.join(repo_name)
-        gh_repo = g.get_repo(repo_name)
-
-        pr = gh_repo.create_pull(
-            title="Add Array Products Calculator",
-            body=f"Implements array products calculator with the following approach:\n\n{solution.description}",
-            base="main",
-            head=branch_name
+    if state.get("review_feedback"):
+        prompt += (
+            "The previously generated code was rejected. "
+            "The reviewer provided the following feedback:\n"
+            f"{state['review_feedback']}\n\n"
+            "Update the code accordingly to address the issue. "
+            "Ensure the code follows best practices, and include in-code comments to explain the code.  "
+            "Do not output anything else such as explanation or commentary, other than the code.\n"
+        )
+    else:
+        prompt += (
+            "Ensure the code follows best practices, and include in-code comments to explain the code.  "
+            "Only output the code, do not output anything else such as commentary or explanation.\n"
         )
 
-        print(f"Created PR: {pr.html_url}")
-        return {**state, "status": "completed", "pr_url": pr.html_url}
+    # attempt_counter = 1
 
-    except Exception as e:
-        print(f"Failed to create PR: {str(e)}")
-        return {**state, "status": "failed"}
+    print("Generating code...")
+    message = llm.invoke([HumanMessage(content=prompt)]).content
+    state["generated_code"] = message.strip()
+    print("Code generated by coder:")
+    print(f"{state['generated_code']}")
+
+    state["review_feedback"] = ""
+
+    # language = state.get("language", "python").lower()
+    # language_ext = {"python": ".py", "javascript": ".js", "java": ".java", "c++": ".cpp"}
+    # if language not in language_ext.keys():
+    #     # default fallback
+    #     ext = ".txt"
+    # else:
+    #     ext = language_ext[language]
+
+    ext = state['extension']
+    code_file = os.path.join(state["repo_path"], f"solution{ext}")
+    with open(code_file, "w") as f:
+        f.write(state["generated_code"])
+    print(f"Generated code written to {code_file}.")
+    return state
 
 
-def should_continue(state: GraphState) -> str:
-    """Determine next step based on status."""
-    if state["status"] == "failed":
-        if state["iterations"] < 3:
-            return "generate"
-        return "end"
-    return "continue"
-
-
-def create_agent(github_token: str, repo_name: str):
-    workflow = StateGraph(GraphState)
-    workflow.add_node("generate", generate_solution)
-    workflow.add_node("test", test_solution)
-    workflow.add_node("create_pr", create_pr)
-
-    # Define core workflow
-    workflow.add_edge(START, "generate")
-    workflow.add_edge("generate", "test")
-    workflow.add_edge("create_pr", END)
-
-    # Define conditional transitions from test node
-    workflow.add_conditional_edges(
-        "test", should_continue,
-        {"generate": "generate", "continue": "create_pr", "end": END}
+def review_code(state: AgentState) -> AgentState:
+    # MAIN PROMPT FOR REVIEWER
+    review_prompt = (
+        "You are a senior code reviewer. Review the following code and decide if it is correct, can fulfill the task as required, and is ready for submission. "
+        "If the code is acceptable, reply with 'APPROVE'. Do not use the word 'reject' in any form if the code is acceptable. "
+        "If it is not acceptable, reply with 'REJECT: <feedback>' where <feedback> contains the explanation of the issues with the code and suggestions for improvement. Likewise, do not use the word 'approve' in any form if the code is rejected.\n"
+        "Task given:\n"
+        f"{state['task_description']}\n"
+        "Code:\n"
+        f"{state['generated_code']}\n"
     )
-    return workflow.compile()
+    print("Reviewing code...")
+    review_response = llm.invoke([HumanMessage(content=review_prompt)]).content.strip()
+    review_response_lower = review_response.lower()
+    print("Feedback from reviewer: ")
+    print(f"{review_response_lower}")
+    if review_response_lower.startswith("approve"):
+        state["review_decision"] = "approve"
+        state["review_feedback"] = ""
+    elif review_response_lower.startswith("reject:"):
+        state["review_decision"] = "reject"
+        state["review_feedback"] = review_response[len("reject:"):].strip()
+    else:
+        state["review_decision"] = "reject"
+        state["review_feedback"] = review_response
+    print(f"Review decision: {state['review_decision']}")
+    if state["review_decision"] == "reject":
+        print(f"Feedback from reviewer: {state['review_feedback']}")
+    return state
 
 
-def run_agent(github_token: str, repo_name: str):
-    """Run the agent to generate and submit a solution."""
+def submit_code(state: AgentState) -> AgentState:
+    repo_path = state["repo_path"]
+    cwd = os.getcwd()
+    os.chdir(repo_path)
     try:
-        agent = create_agent(github_token, repo_name)
-        initial_state = initialize_state(github_token, repo_name)
+        subprocess.run(["git", "add", "."], check=True)
+        subprocess.run(["git", "commit", "-m", "Auto-generated code update"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        print(f"solution{state['extension']} pushed to GitHub successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Error during git operations:", e)
+    finally:
+        os.chdir(cwd)
+    return state
 
-        if initial_state["status"] == "failed":
-            print("Failed to initialize agent")
-            return {"status": "failed"}
 
-        result = agent.invoke(initial_state)
+#TODO: optional, abort state
+def abort_submission(state: AgentState) -> AgentState:
+    print("Submission aborted.")
+    return state
 
-        if result["status"] == "completed":
-            print("Successfully created PR with solution!")
-        else:
-            print("Failed to create solution")
 
-        return {
-            "status": result["status"],
-            "generation": result["generation"].code if result["generation"] else None,
-            "pr_url": result.get("pr_url")
+workflow = StateGraph(AgentState)
+workflow.add_node("clone_and_generate", clone_and_generate)
+workflow.add_node("review_code", review_code)
+workflow.add_node("submit_code", submit_code)
+workflow.add_node("abort", abort_submission)
+
+workflow.set_entry_point("clone_and_generate")
+
+workflow.add_edge("clone_and_generate", "review_code")
+
+def decide_next(state: AgentState) -> str:
+    # If approved, return "approve".
+    # If rejected and feedback exists, return "reject" to retry.
+    if state["review_decision"] == "approve":
+        return "approve"
+    elif state["review_decision"] == "reject":
+        # For this example, we assume the coding node should retry.
+        return "retry"
+    else:
+        return "abort"
+
+
+# # determine whether to retry
+# workflow.add_conditional_edges(
+#     source = "review_code",
+#     path = decide_next,
+#     path_map={
+#         "approve": "submit_code",
+#         "retry": "clone_and_generate",
+#         "abort": "abort"
+#     }
+# )
+#
+# workflow.add_edge("submit_code", END)
+# workflow.add_edge("abort", END)
+
+# a util specifically to fix the rmtree issue on Windows
+def on_rm_error(func, path, exc_info):
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def run_agent(api_key: str, repo_url: str, language: str = "python") -> AgentState:
+    # Set the API key in the environment.
+    os.environ["OPENAI_API_KEY"] = api_key
+    initial_state: AgentState = {
+        "repo_url": repo_url,
+        "repo_path": "",
+        "task_description": "",
+        "generated_code": "",
+        "review_decision": "",
+        "review_feedback": "",
+        "language": language,
+    }
+
+    workflow = StateGraph(AgentState)
+    workflow.add_node("clone_and_generate", clone_and_generate)
+    workflow.add_node("review_code", review_code)
+    workflow.add_node("submit_code", submit_code)
+    workflow.add_node("abort", abort_submission)
+
+    workflow.set_entry_point("clone_and_generate")
+
+    workflow.add_edge("clone_and_generate", "review_code")
+
+    # determine whether to retry
+    workflow.add_conditional_edges(
+        source="review_code",
+        path=decide_next,
+        path_map={
+            "approve": "submit_code",
+            "retry": "clone_and_generate",
+            "abort": "abort"
         }
+    )
 
-    except Exception as e:
-        print("Agent execution failed")
-        return {"status": "failed"}
+    workflow.add_edge("submit_code", END)
+    workflow.add_edge("abort", END)
+
+
+    app = workflow.compile()
+    final_state = app.invoke(initial_state)
+    return final_state
+
+# initial_state: AgentState = {
+#     "repo_url": "https://github.com/dangn511/test-task",
+#     "repo_path": "",
+#     "task_description": "",
+#     "generated_code": "",
+#     "review_decision": "",
+#     "review_feedback": ""
+# }
+
+# app = workflow.compile()
+# final_state = app.invoke(initial_state)
+# print("\nFinal workflow state:")
+# print(final_state)
+
+# run_agent(OPENAI_API_KEY, "https://github.com/dangn511/test-task")

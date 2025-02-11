@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Agent Deployment</title>
+</head>
+<body>
+    <h1>Deploy Agent</h1>
+    <form id="agentForm">
+        <label for="api_key">API Key:</label>
+        <input type="text" id="api_key" name="api_key" required><br><br>
+        <label for="repo_url">Repository URL:</label>
+        <input type="text" id="repo_url" name="repo_url" required><br><br>
+        <label for="language">Programming Language:</label>
+        <input type="text" id="language" name="language" value="python"><br><br>
+        <button type="submit">Submit</button>
+    </form>
+    <h2>Generated Code:</h2>
+    <pre id="result"></pre>
+
+    <script>
+        document.getElementById("agentForm").addEventListener("submit", function(event) {
+            event.preventDefault(); // Prevent the default form submission
+            const formData = new FormData(this);
+            fetch("/", {
+                method: "POST",
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    document.getElementById("result").textContent = "Error: " + data.error;
+                } else {
+                    document.getElementById("result").textContent = data.generated_code;
+                }
+            })
+            .catch(error => {
+                document.getElementById("result").textContent = "An error occurred: " + error;
+            });
+        });
+    </script>
+</body>
+</html>
