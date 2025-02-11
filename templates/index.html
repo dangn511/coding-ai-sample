@@ -2,17 +2,17 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Agent Deployment</title>
+    <title>Coding agent</title>
 </head>
 <body>
-    <h1>Deploy Agent</h1>
+    <h1>Agent parameters</h1>
     <form id="agentForm">
         <label for="api_key">API Key:</label>
         <input type="text" id="api_key" name="api_key" required><br><br>
         <label for="repo_url">Repository URL:</label>
         <input type="text" id="repo_url" name="repo_url" required><br><br>
-        <label for="language">Programming Language:</label>
-        <input type="text" id="language" name="language" value="python"><br><br>
+        <label for="language">Programming language (available options: python, javascript, java, c++):</label>
+        <input type="text" id="language" name="language""><br><br>
         <button type="submit">Submit</button>
     </form>
     <h2>Generated Code:</h2>
@@ -20,7 +20,7 @@
 
     <script>
         document.getElementById("agentForm").addEventListener("submit", function(event) {
-            event.preventDefault(); // Prevent the default form submission
+            event.preventDefault();
             const formData = new FormData(this);
             fetch("/", {
                 method: "POST",
