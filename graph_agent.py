@@ -35,7 +35,10 @@ def clone_repository(github_token: str, repo_name: str) -> tuple[str, str]:
 
         g = Github(github_token)
         repo = g.get_repo(repo_name)
+
+        print(f"Cloning repository {repo_name}...")
         Repo.clone_from(repo.clone_url, repo_dir)
+        print("Repository cloned successfully.")
         return repo_dir, ""
     except Exception as e:
         return "", f"Repository setup failed: {str(e)}"
@@ -48,7 +51,7 @@ def read_task_file(repo_dir: str) -> tuple[str, str]:
         with open(task_path, 'r') as f:
             return f.read(), ""
     except Exception as e:
-        return "", f"Failed to read task: {str(e)}"
+        return "", f"Task read failed {str(e)}"
 
 
 def initialize_state(github_token: str, repo_name: str) -> dict:
